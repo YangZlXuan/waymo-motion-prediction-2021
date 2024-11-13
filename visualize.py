@@ -89,11 +89,13 @@ def main():
                         continue
 
                     alpha = confidences[traj_id].item()
+                    alpha = 0.7
                     plt.plot(
                         logits[traj_id][is_available > 0][::10, 0],
                         logits[traj_id][is_available > 0][::10, 1],
                         "-o",
-                        label=f"pred {traj_id} {alpha:.3f}",
+                        # label=f"pred {traj_id} {alpha:.3f}",
+                        label=f"pred {traj_id}",
                         alpha=alpha,
                     )
 
@@ -104,6 +106,70 @@ def main():
                 os.path.join(args.save, f"{iii:0>2}_{loss.item():.3f}.png")
             )
             plt.close()
+            # confidences_logits, logits = model(x)
+            # print("Predicted Trajectories:", logits)
+            # print("Confidences:", confidences_logits)
+            # # import numpy as np
+            #
+            # # 自定义的距离阈值
+            # miss_threshold = 2.0  # 例如2米为miss rate的阈值
+            #
+            # # 初始化计算指标的容器
+            # min_ade = []
+            # min_fde = []
+            # miss_rate_count = 0
+            # total_trajectories = 0
+            # overlap_count = 0
+            # total_points = 0
+            #
+            # # 遍历每个场景的预测结果
+            # for i in range(len(logits)):
+            #     pred_trajectories = logits[i]  # 预测的轨迹
+            #     gt_trajectory = y[i]  # 真实轨迹
+            #
+            #     # 计算 MinADE 和 MinFDE
+            #     ade_list = []
+            #     fde_list = []
+            #
+            #     for pred in pred_trajectories:
+            #         # 计算ADE (平均位移误差)
+            #         ade = np.mean(np.sqrt(np.sum((pred - gt_trajectory) ** 2, axis=1)))
+            #         ade_list.append(ade)
+            #
+            #         # 计算FDE (终点位移误差)
+            #         fde = np.sqrt(np.sum((pred[-1] - gt_trajectory[-1]) ** 2))
+            #         fde_list.append(fde)
+            #
+            #     # 记录最小ADE和最小FDE
+            #     min_ade.append(min(ade_list))
+            #     min_fde.append(min(fde_list))
+            #
+            #     # 计算Miss Rate (如果最小FDE大于阈值，则计为miss)
+            #     if min(fde_list) > miss_threshold:
+            #         miss_rate_count += 1
+            #
+            #     total_trajectories += 1
+            #
+            #     # 计算Overlap Rate (简单示例：预测点与真实点在阈值范围内计为重叠)
+            #     for j in range(len(pred_trajectories[0])):  # 遍历每个时间步的点
+            #         pred_points = np.array([pred[j] for pred in pred_trajectories])
+            #         gt_point = gt_trajectory[j]
+            #
+            #         # 判断是否有轨迹点与真实点接近，计为重叠
+            #         overlaps = np.sqrt(np.sum((pred_points - gt_point) ** 2, axis=1)) < miss_threshold
+            #         if np.any(overlaps):
+            #             overlap_count += 1
+            #         total_points += 1
+            #
+            # # 计算Miss Rate和Overlap Rate
+            # miss_rate = miss_rate_count / total_trajectories
+            # overlap_rate = overlap_count / total_points
+            #
+            # # 输出结果
+            # print(f"MinADE: {np.mean(min_ade):.4f}")
+            # print(f"MinFDE: {np.mean(min_fde):.4f}")
+            # print(f"Miss Rate: {miss_rate:.4f}")
+            # print(f"Overlap Rate: {overlap_rate:.4f}")
 
             iii += 1
             if iii == args.n_samples:

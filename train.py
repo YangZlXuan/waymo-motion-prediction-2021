@@ -1,6 +1,6 @@
 import argparse
 import os
-
+import random
 import numpy as np
 import timm
 import torch
@@ -8,6 +8,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+import  matplotlib.pyplot as plt
 
 IMG_RES = 224
 IN_CHANNELS = 25
@@ -88,20 +89,22 @@ class Model(nn.Module):
         self, model_name, in_channels=IN_CHANNELS, time_limit=TL, n_traj=N_TRAJS
     ):
         super().__init__()
-
+        pretrained_cfg_overlay = {
+            'file': r"/home/yangzixuan/.cache/huggingface/hub/models--timm--xception71.tf_in1k/pytorch_model.bin"}
         self.n_traj = n_traj
         self.time_limit = time_limit
         self.model = timm.create_model(
             model_name,
             pretrained=True,
             in_chans=in_channels,
+            pretrained_cfg_overlay=pretrained_cfg_overlay,
             num_classes=self.n_traj * 2 * self.time_limit + self.n_traj,
         )
-
+        # self.fc_dropout = nn.Dropout(0.3)  # 更低的Dropout概率
 
     def forward(self, x):
         outputs = self.model(x)
-
+        # outputs = self.fc_dropout(outputs)  # Dropout 应用在全连接层后
         confidences_logits, logits = (
             outputs[:, : self.n_traj],
             outputs[:, self.n_traj :],
@@ -194,8 +197,23 @@ class WaymoLoader(Dataset):
 
         return raster, trajectory, is_available
 
+def set_seed(seed: int):
+    # Python 随机数生成器
+    random.seed(seed)
+    # NumPy 随机数生成器
+    np.random.seed(seed)
+    # PyTorch 随机数生成器
+    torch.manual_seed(seed)
+    # 如果你在使用 GPU，也需要设置下面这行以确保 GPU 上的随机性
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # 如果有多个 GPU
+    # 保证 CuDNN 后端的结果可复现
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 def main():
+    SEED = 30  # 可以根据需要选择不同的种子(20，21.40)
+    set_seed(SEED)
     args = parse_args()
 
     summary_writer = SummaryWriter(os.path.join(args.save, "logs"))
@@ -205,6 +223,9 @@ def main():
     path_to_save = args.save
     if not os.path.exists(path_to_save):
         os.mkdir(path_to_save)
+
+    if not os.path.exists(os.path.join(path_to_save, "loss_pic")):
+        os.mkdir(os.path.join(path_to_save, "loss_pic"))  # 创建保存图像的目录
 
     dataset = WaymoLoader(train_path)
 
@@ -238,6 +259,7 @@ def main():
     model.cuda()
 
     lr = args.lr
+    # optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-5)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -252,87 +274,178 @@ def main():
     best_loss = float("+inf")
     glosses = []
 
-    tr_it = iter(dataloader)
+    # 用于存储每个 epoch 的 train_bk loss 和 validation loss
+    train_losses = []
+    val_losses_epoch = []
+
     n_epochs = args.n_epochs
-    progress_bar = tqdm(range(start_iter, len(dataloader) * n_epochs))
 
-    saver = lambda name: torch.save(
-        {
-            "score": best_loss,
-            "iteration": iteration,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "loss": loss.item(),
-        },
-        os.path.join(path_to_save, name),
-    )
+    for epoch in range(n_epochs):
+        progress_bar = tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Epoch {epoch + 1}/{n_epochs}")
 
-    for iteration in progress_bar:
         model.train()
-        try:
-            x, y, is_available = next(tr_it)
-        except StopIteration:
-            tr_it = iter(dataloader)
-            x, y, is_available = next(tr_it)
+        last_train_loss = None  # 用于存储最后一次的训练损失
 
-        x, y, is_available = map(lambda x: x.cuda(), (x, y, is_available))
+        for iteration, (x, y, is_available) in progress_bar:
+            x, y, is_available = map(lambda x: x.cuda(), (x, y, is_available))
 
-        optimizer.zero_grad()
-
-        confidences_logits, logits = model(x)
-
-        loss = pytorch_neg_multi_log_likelihood_batch(
-            y, logits, confidences_logits, is_available
-        )
-        loss.backward()
-        optimizer.step()
-        scheduler.step()
-
-        glosses.append(loss.item())
-        if (iteration + 1) % args.n_monitor_train == 0:
-            progress_bar.set_description(
-                f"loss: {loss.item():.3}"
-                f" avg: {np.mean(glosses[-100:]):.2}"
-                f" {scheduler.get_last_lr()[-1]:.3}"
-            )
-            summary_writer.add_scalar("train/loss", loss.item(), iteration)
-            summary_writer.add_scalar("lr", scheduler.get_last_lr()[-1], iteration)
-
-        if (iteration + 1) % args.n_monitor_validate == 0:
             optimizer.zero_grad()
-            model.eval()
-            with torch.no_grad():
-                val_losses = []
-                for x, y, is_available in val_dataloader:
-                    x, y, is_available = map(lambda x: x.cuda(), (x, y, is_available))
 
-                    confidences_logits, logits = model(x)
-                    loss = pytorch_neg_multi_log_likelihood_batch(
-                        y, logits, confidences_logits, is_available
-                    )
-                    val_losses.append(loss.item())
+            confidences_logits, logits = model(x)
 
-                summary_writer.add_scalar("dev/loss", np.mean(val_losses), iteration)
+            loss = pytorch_neg_multi_log_likelihood_batch(
+                y, logits, confidences_logits, is_available
+            )
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
 
-            saver("model_last.pth")
+            last_train_loss = loss.item()  # 记录最后一次的训练损失
 
-            mean_val_loss = np.mean(val_losses)
-            if mean_val_loss < best_loss:
-                best_loss = mean_val_loss
-                saver("model_best.pth")
+            if (iteration + 1) % args.n_monitor_train == 0:
+                progress_bar.set_postfix(
+                    loss=f"{loss.item():.3f}",
+                    lr=f"{scheduler.get_last_lr()[-1]:.6f}",
+                )
+                summary_writer.add_scalar("train/loss", loss.item(), iteration + epoch * len(dataloader))
+                summary_writer.add_scalar("lr", scheduler.get_last_lr()[-1], iteration + epoch * len(dataloader))
 
-                model.eval()
-                with torch.no_grad():
-                    traced_model = torch.jit.trace(
-                        model,
-                        torch.rand(
-                            1, args.in_channels, args.img_res, args.img_res
-                        ).cuda(),
-                    )
+        # 记录每轮最后一次的 train_bk loss
+        train_losses.append(last_train_loss)
 
-                traced_model.save(os.path.join(path_to_save, "model_best.pt"))
-                del traced_model
+        # 验证阶段
+        model.eval()
+        last_val_loss = None  # 用于存储最后一次的验证损失
+
+        with torch.no_grad():
+            for x, y, is_available in val_dataloader:
+                x, y, is_available = map(lambda x: x.cuda(), (x, y, is_available))
+
+                confidences_logits, logits = model(x)
+                val_loss = pytorch_neg_multi_log_likelihood_batch(
+                    y, logits, confidences_logits, is_available
+                )
+                last_val_loss = val_loss.item()  # 记录最后一次的验证损失
+
+        # 记录最后一次的 validation loss
+        val_losses_epoch.append(last_val_loss)
+        summary_writer.add_scalar("dev/loss", last_val_loss, epoch)
+
+        # 保存最佳模型
+        if last_val_loss < best_loss:
+            best_loss = last_val_loss
+            saver = lambda name: torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "loss": last_val_loss,
+                },
+                os.path.join(path_to_save, name),
+            )
+            saver("model_best.pth")
+
+            traced_model = torch.jit.trace(
+                model,
+                torch.rand(1, args.in_channels, args.img_res, args.img_res).cuda(),
+            )
+            traced_model.save(os.path.join(path_to_save, "model_best.pt"))
+            del traced_model
+
+    # 所有 epoch 结束后绘制 loss 曲线并保存
+    plt.figure(figsize=(10, 6))
+    plt.plot(range(1, n_epochs + 1), train_losses, label="Train Loss")
+    plt.plot(range(1, n_epochs + 1), val_losses_epoch, label="Validation Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Train and Validation Loss")
+    plt.legend()
+    plt.grid(True)
+
+    # 保存 loss 曲线
+    plt.savefig(os.path.join(path_to_save, "loss_pic", "train_val_loss150.png"))
+    plt.close()
+    print(train_losses)
+    print(val_losses_epoch)
+    # 修改结束
+    # saver = lambda name: torch.save(
+    #     {
+    #         "score": best_loss,
+    #         "iteration": iteration,
+    #         "model_state_dict": model.state_dict(),
+    #         "optimizer_state_dict": optimizer.state_dict(),
+    #         "scheduler_state_dict": scheduler.state_dict(),
+    #         "loss": loss.item(),
+    #     },
+    #     os.path.join(path_to_save, name),
+    # )
+    #
+    # for iteration in progress_bar:
+    #     model.train_bk()
+    #     try:
+    #         x, y, is_available = next(tr_it)
+    #     except StopIteration:
+    #         tr_it = iter(dataloader)
+    #         x, y, is_available = next(tr_it)
+    #
+    #     x, y, is_available = map(lambda x: x.cuda(), (x, y, is_available))
+    #
+    #     optimizer.zero_grad()
+    #
+    #     confidences_logits, logits = model(x)
+    #
+    #     loss = pytorch_neg_multi_log_likelihood_batch(
+    #         y, logits, confidences_logits, is_available
+    #     )
+    #     loss.backward()
+    #     optimizer.step()
+    #     scheduler.step()
+    #
+    #     glosses.append(loss.item())
+    #     if (iteration + 1) % args.n_monitor_train == 0:
+    #         progress_bar.set_description(
+    #             f"loss: {loss.item():.3}"
+    #             f" avg: {np.mean(glosses[-100:]):.2}"
+    #             f" {scheduler.get_last_lr()[-1]:.3}"
+    #         )
+    #         summary_writer.add_scalar("train_bk/loss", loss.item(), iteration)
+    #         summary_writer.add_scalar("lr", scheduler.get_last_lr()[-1], iteration)
+    #
+    #     if (iteration + 1) % args.n_monitor_validate == 0:
+    #         optimizer.zero_grad()
+    #         model.eval()
+    #         with torch.no_grad():
+    #             val_losses = []
+    #             for x, y, is_available in val_dataloader:
+    #                 x, y, is_available = map(lambda x: x.cuda(), (x, y, is_available))
+    #
+    #                 confidences_logits, logits = model(x)
+    #                 loss = pytorch_neg_multi_log_likelihood_batch(
+    #                     y, logits, confidences_logits, is_available
+    #                 )
+    #                 val_losses.append(loss.item())
+    #
+    #             summary_writer.add_scalar("dev/loss", np.mean(val_losses), iteration)
+    #
+    #         saver("model_last.pth")
+    #
+    #         mean_val_loss = np.mean(val_losses)
+    #         if mean_val_loss < best_loss:
+    #             best_loss = mean_val_loss
+    #             saver("model_best.pth")
+    #
+    #             model.eval()
+    #             with torch.no_grad():
+    #                 traced_model = torch.jit.trace(
+    #                     model,
+    #                     torch.rand(
+    #                         1, args.in_channels, args.img_res, args.img_res
+    #                     ).cuda(),
+    #                 )
+    #
+    #             traced_model.save(os.path.join(path_to_save, "model_best.pt"))
+    #             del traced_model
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@ def parse_args():
         "--save", type=str, required=True, help="Path to save predictions"
     )
     parser.add_argument(
-        "--model-name", type=str, required=False, help="Model name"
+        "--model-name", type=str, required=False, default= "xception71" ,help="Model name"
     )
 
     parser.add_argument("--account-name", required=False, default="")
@@ -58,7 +58,7 @@ def main():
 
     dataset = WaymoLoader(args.test_data, is_test=True)
     loader = DataLoader(
-        dataset, batch_size=args.batch_size, num_workers=min(args.batch_size, 16)
+        dataset, batch_size=2, num_workers=1
     )
 
     RES = {}

@@ -189,12 +189,12 @@ def parse_arguments():
         "--use-vectorize", action="store_true", help="Generate vector data"
     )
     parser.add_argument(
-        "--n-jobs", type=int, default=20, required=False, help="Number of threads"
+        "--n-jobs", type=int, default=1, required=False, help="Number of threads"
     )
     parser.add_argument(
         "--n-shards",
         type=int,
-        default=8,
+        default=1,
         required=False,
         help="Use `1/n_shards` of full dataset",
     )
@@ -728,6 +728,9 @@ def vectorize(
 def merge(
     data, proc_id, validate, out_dir, use_vectorize=False, max_rand_int=10000000000
 ):
+    # 子进程中不再配置 GPU
+    parsed = tf.io.parse_single_example(data, features_description)
+
     parsed = tf.io.parse_single_example(data, features_description)
     raster_data = rasterize(
         parsed["state/tracks_to_predict"].numpy(),
@@ -797,6 +800,15 @@ def merge(
 
 
 def main():
+    # 在主进程中设置可见设备
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        try:
+            # 按需增长显存
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+        except RuntimeError as e:
+            print(e)
     args = parse_arguments()
     print(args)
 
@@ -833,4 +845,5 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.set_start_method('spawn')
     main()
